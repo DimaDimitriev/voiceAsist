@@ -1,53 +1,63 @@
 import requests
 import wikipedia
-from openai import OpenAI
 
-# ================= Настройки =================
-WEATHER_API_KEY = "14ebd344becc6b5f6d0c5da75f921119"
-# =============================================
+import config
+
+wikipedia.set_lang("ru")
+
+# Длинные фразы идут первыми, чтобы «найди информацию о» не обрезалось до «найди»
+_WIKI_PREFIXES = sorted(
+    ["что такое", "кто такой", "кто такая", "расскажи о", "расскажи об", "расскажи про",
+     "найди информацию о", "найди информацию", "википедия", "найди"],
+    key=len, reverse=True,
+)
+
+
 class AlphaAssistant:
-    def __init__(self):
-        # Клиент OpenAI удален
-        pass
-
-    def get_weather(self):
-        """Запрос данных о погоде в Томске через API OpenWeatherMap"""
-        city = "Tomsk,RU"
-        url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
-        
+    def get_weather(self) -> str:
+        """Погода через OpenWeatherMap (город и ключ задаются в .env)."""
+        if not config.WEATHER_API_KEY:
+            return "Не задан ключ погоды. Добавьте WEATHER_API_KEY в файл .env."
         try:
-            res = requests.get(url).json()
-            if res.get("cod") != 200:
+            res = requests.get(
+                "https://api.openweathermap.org/data/2.5/weather",
+                params={"q": config.WEATHER_CITY, "appid": config.WEATHER_API_KEY,
+                        "units": "metric", "lang": "ru"},
+                timeout=5,
+            ).json()
+            if str(res.get("cod")) != "200":
                 return "Не удалось получить данные о погоде."
-            
             temp = round(res["main"]["temp"])
             status = res["weather"][0]["description"]
-            return f"В Томске сейчас {temp} градусов, {status}."
-        except:
+            return f"Сейчас {temp} градусов, {status}."
+        except Exception:
             return "Ошибка связи с метеослужбой."
 
-    def get_wiki(self, query):
-        """Поиск краткого определения (1 предложение) в Википедии"""
-        wikipedia.set_lang("ru")
-        text = query.lower()
-        prefixes = ["что такое", "кто такой", "википедия", "найди"]
-        search_term = text
-        for p in prefixes:
-            search_term = search_term.replace(p, "")
+    @staticmethod
+    def _clean_query(text: str) -> str:
+        text = text.lower()
+        for prefix in _WIKI_PREFIXES:
+            idx = text.find(prefix)
+            if idx != -1:
+                text = text[idx + len(prefix):]
+                break
+        return text.strip()
 
-        search_term = search_term.strip()
-
-        if not search_term:
+    def get_wiki(self, query: str) -> str:
+        """Краткая справка из Википедии (2 предложения)."""
+        term = self._clean_query(query)
+        if not term:
             return "Вы не уточнили, что именно нужно найти."
 
-        print(f"[...] Ищу в Википедии: {search_term}")
-        
+        print(f"[...] Ищу в Википедии: {term}")
         try:
-            return wikipedia.summary(search_term.strip(), sentences=3)
-        except wikipedia.DisambiguationError:
-            return "Найдено слишком много совпадений. Уточните запрос."
+            return wikipedia.summary(term, sentences=2)
+        except wikipedia.DisambiguationError as e:
+            try:  # берём первый вариант вместо отказа
+                return wikipedia.summary(e.options[0], sentences=2)
+            except Exception:
+                return "Найдено слишком много совпадений. Уточните запрос."
         except wikipedia.PageError:
             return "Я не нашла такой статьи в Википедии."
-        except:
+        except Exception:
             return "Ошибка при поиске в энциклопедии."
-

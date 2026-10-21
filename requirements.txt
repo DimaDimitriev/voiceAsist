@@ -1,0 +1,8 @@
+vosk
+sounddevice
+pyttsx3
+rapidfuzz
+requests
+wikipedia
+python-dotenv
+ 

@@ -1,61 +1,81 @@
+import re
+
 from rapidfuzz import fuzz, process
-# import web     # Участник 3
-import open_files_os
+
 import Functions
-# Словарь намерений
-INTENTS = {
-    'weather': ['погода', 'прогноз', 'температура', 'градусы', 'холодно'],
-    'mail': ['почта', 'письма', 'проверь ящик', 'новые сообщения'],
-    'apps': ['открой', 'запусти', 'включи'],
-    'system':['выключи компьютер','отруби компьютер','выруби компьютер','отключи компьютер'],
-    'time': ['время','час','времени'],
-    'wiki': ['кто такой', 'что такое', 'расскажи о', 'найди информацию']
+import open_files_os
+
+assistant = Functions.AlphaAssistant()
+
+# Точные шаблоны. Порядок важен: сначала опасные и конкретные намерения.
+PATTERNS = [
+    ("cancel", r"отмен\w*"),
+    ("system", r"(?:выключи|выруби|отруби|отключи)\s+(?:компьютер|комп|пк)"),
+    ("wiki", r"что такое|кто такой|кто такая|расскажи (?:о|об|про)|найди информацию|википеди\w*"),
+    ("weather", r"погод\w*|прогноз\w*|температур\w*|градус\w*|холодно|жарко"),
+    ("mail", r"почт[аыуе]|письм\w*|проверь ящик|новые сообщения"),
+    ("time", r"врем(?:я|ени)|который час|час(?:а|ов)?"),
+    ("apps", r"открой|запусти|включи|поставь|покажи|пауз\w*|стоп|следующ\w*|предыдущ\w*|дальше|музык\w*"),
+]
+_COMPILED = [(name, re.compile(rf"(?<!\w)(?:{p})(?!\w)")) for name, p in PATTERNS]
+
+# Запасной вариант на случай, если Vosk исказил слово («пагода»). Выключение сюда НЕ входит.
+FUZZY_WORDS = {
+    "weather": ["погода", "прогноз", "температура", "холодно"],
+    "mail": ["почта", "письма", "сообщения"],
+    "time": ["время", "времени"],
+    "apps": ["открой", "запусти", "включи", "поставь", "покажи", "пауза", "следующий", "музыку"],
 }
-AlphaAssistant = Functions.AlphaAssistant()
+FUZZY_THRESHOLD = 82
+EXIT_WORDS = {"пока", "выключись"}
+
+
+def normalize(text: str) -> str:
+    return " ".join(text.lower().replace("ё", "е").split())
+
+
+def is_exit_command(text: str) -> bool:
+    """Выход по целому слову: «покажи» больше не содержит «пока»."""
+    text = normalize(text)
+    return bool(EXIT_WORDS & set(text.split())) or "до свидания" in text
+
+
+def _pattern_intent(text: str):
+    for name, rx in _COMPILED:
+        if rx.search(text):
+            return name
+    return None
+
+
+def _fuzzy_intent(text: str):
+    best, best_score = None, 0
+    for word in text.split():
+        if len(word) < 4:
+            continue
+        for intent, keywords in FUZZY_WORDS.items():
+            match = process.extractOne(word, keywords, scorer=fuzz.ratio)
+            if match and match[1] > best_score:
+                best, best_score = intent, match[1]
+    return best if best_score >= FUZZY_THRESHOLD else None
+
 
 def resolve_intent(text: str) -> str:
-    best_intent = None
-    max_score = 0
+    text = normalize(text)
+    intent = _pattern_intent(text) or _fuzzy_intent(text)
 
-    for intent, keywords in INTENTS.items():
-        result = process.extractOne(text, keywords, scorer=fuzz.WRatio)
-        if result and result[1] > max_score:
-            max_score = result[1]
-            best_intent = intent
-    #Порог уверенности
-    if max_score < 70:
-        return "Я услышал: '" + text + "', но не понял команду. Повторите иначе."
-
-    #Погода
-    if best_intent == 'weather':
-        return AlphaAssistant.get_weather()
-
-    #Поиск в википедии
-    elif best_intent == 'wiki':
-        # Вырезаем ключевые слова, чтобы оставить только запрос (н-р: "кто такой Пушкин")
-        query = text
-        for word in INTENTS['wiki']:
-            query = query.replace(word, "").strip()
-        return AlphaAssistant.get_wiki(query)
-
-    #вывести последние несколько тем писем с почты
-    elif best_intent == 'mail':
+    if intent == "cancel":
+        return open_files_os.cancel_shutdown()
+    if intent == "system":
+        return open_files_os.shutdown_pc()
+    if intent == "wiki":
+        return assistant.get_wiki(text)
+    if intent == "weather":
+        return assistant.get_weather()
+    if intent == "mail":
         return open_files_os.check_mail()
-
-    #Включение всех приложений
-    elif best_intent == 'apps':
-        # Пытаемся понять, какое приложение запустить
+    if intent == "time":
+        return open_files_os.get_time()
+    if intent == "apps":
         return open_files_os.run_app(text)
 
-    #Выключение пк
-    elif best_intent == 'system':
-        return open_files_os.shutdown_pc()
-
-    #Время
-    elif best_intent == 'time':
-        return open_files_os.get_time()
-
-    else:
-        return "Команда распознана, но обработчик еще не настроен."
-
-# print(resolve_intent("что такое заяц беляк"))
+    return f"Я услышал: «{text}», но не понял команду. Повторите иначе."

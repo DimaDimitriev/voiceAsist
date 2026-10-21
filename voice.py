@@ -1,47 +1,66 @@
-import os
 import json
-import pyaudio
+import os
+import sys
+
+import queue
+
 import pyttsx3
-from vosk import Model, KaldiRecognizer
+import sounddevice as sd
+from vosk import KaldiRecognizer, Model, SetLogLevel
 
-# Настройки
-MODEL_PATH = "vosk-model-small-ru"
-if not os.path.exists(MODEL_PATH):
-    print("Ошибка: Папка с моделью Vosk не найдена!")
-    exit(1)
+import config
 
-model = Model(MODEL_PATH)
+SAMPLE_RATE = 16000
+SetLogLevel(-1)  # без служебного шума Vosk в консоли
+
+if not os.path.isdir(config.VOSK_MODEL_PATH):
+    sys.exit(
+        f"Не найдена модель Vosk: {config.VOSK_MODEL_PATH}\n"
+        "Скачайте vosk-model-small-ru с https://alphacephei.com/vosk/models "
+        "и распакуйте в папку проекта."
+    )
+
+model = Model(config.VOSK_MODEL_PATH)
+
+
+def _russian_voice_id(engine):
+    """Ищет русский голос; если его нет, вернёт None и останется голос по умолчанию."""
+    for v in engine.getProperty("voices"):
+        info = f"{v.id} {v.name}".lower()
+        if "ru-ru" in info or "russian" in info or "_ru_" in info:
+            return v.id
+    return None
 
 
 def speak(text: str):
-    """Функция озвучки: создает движок, говорит и полностью закрывается"""
+    """Озвучка: движок создаётся заново на каждую фразу — так pyttsx3 не зависает на Windows."""
     print(f"Ассистент: {text}")
-    engine = pyttsx3.init()
-    engine.setProperty('rate', 200)
-    # Можно добавить выбор голоса, если нужно:
-    voices = engine.getProperty('voices')
-    engine.setProperty('voice', voices[0].id)
-
-    engine.say(text)
-    engine.runAndWait()
-    engine.stop()
+    try:
+        engine = pyttsx3.init()
+        engine.setProperty("rate", 190)
+        voice_id = _russian_voice_id(engine)
+        if voice_id:
+            engine.setProperty("voice", voice_id)
+        engine.say(text)
+        engine.runAndWait()
+        engine.stop()
+    except Exception as e:
+        print(f"[!] Ошибка озвучки: {e}")
 
 
 def listen() -> str:
-    """Функция прослушивания: открывает микрофон, ловит фразу и закрывает его"""
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=8000)
-    rec = KaldiRecognizer(model, 16000)
+    """Открывает микрофон, ждёт непустую фразу и всегда закрывает микрофон."""
+    audio_queue: "queue.Queue[bytes]" = queue.Queue()
 
-    print(">>> Слушаю...")
+    def on_audio(indata, frames, time_info, status):
+        audio_queue.put(bytes(indata))
 
-    while True:
-        data = stream.read(4000, exception_on_overflow=False)
-        if rec.AcceptWaveform(data):
-            result = json.loads(rec.Result())
-            if result['text']:
-                # Закрываем ресурсы микрофона сразу после распознавания
-                stream.stop_stream()
-                stream.close()
-                p.terminate()
-                return result['text']
+    rec = KaldiRecognizer(model, SAMPLE_RATE)
+    with sd.RawInputStream(samplerate=SAMPLE_RATE, blocksize=8000, dtype="int16",
+                           channels=1, callback=on_audio):
+        print(">>> Слушаю...")
+        while True:
+            if rec.AcceptWaveform(audio_queue.get()):
+                text = json.loads(rec.Result()).get("text", "").strip()
+                if text:
+                    return text
